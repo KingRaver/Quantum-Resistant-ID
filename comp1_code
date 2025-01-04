@@ -1,0 +1,292 @@
+import { IdentityCredential, IdentityVerifier, RevocationRegistry, type Proof } from './zkp-identity-system';
+import { groth16 } from 'snarkjs';
+import { ethers } from 'ethers';
+import { keccak256 } from 'ethers/lib/utils';
+
+// Healthcare Component
+class HealthcareCredential extends IdentityCredential {
+    private healthRecords: Map<string, EncryptedHealthRecord>;
+    private emergencyAccess: Map<string, EmergencyAccessPolicy>;
+
+    constructor(masterSecret: string) {
+        super(masterSecret);
+        this.healthRecords = new Map();
+        this.emergencyAccess = new Map();
+    }
+
+    interface EncryptedHealthRecord {
+        encryptedData: string;
+        accessPolicy: AccessPolicy;
+        lastUpdated: number;
+        providerId: string;
+        metadata: {
+            recordType: string;
+            facility: string;
+            department: string;
+        };
+    }
+
+    interface EmergencyAccessPolicy {
+        threshold: number;
+        authorizedEntities: string[];
+        validUntil: number;
+        conditionTriggers: string[];
+    }
+
+    // Add health record with encrypted data and access policy
+    async addHealthRecord(
+        recordType: string,
+        encryptedData: string,
+        accessPolicy: AccessPolicy
+    ): Promise<void> {
+        const record: EncryptedHealthRecord = {
+            encryptedData,
+            accessPolicy,
+            lastUpdated: Date.now(),
+            providerId: await this.getCurrentProviderId(),
+            metadata: {
+                recordType,
+                facility: await this.getCurrentFacility(),
+                department: await this.getCurrentDepartment()
+            }
+        };
+        
+        this.healthRecords.set(keccak256(encryptedData), record);
+    }
+
+    // Generate proof of insurance coverage without revealing policy details
+    async generateInsuranceProof(
+        requiredCoverage: string,
+        minCoverageAmount: number
+    ): Promise<Proof> {
+        const wasmFile = './circuits/insurance_verification.wasm';
+        const zkeyFile = './circuits/insurance_verification.zkey';
+
+        const insuranceData = this.attributes.get('insurancePolicy');
+        if (!insuranceData) throw new Error('Insurance policy not found');
+
+        const input = {
+            policyDetails: JSON.parse(insuranceData.value),
+            requiredCoverage,
+            minCoverageAmount,
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof } = await groth16.fullProve(input, wasmFile, zkeyFile);
+        return proof;
+    }
+
+    // Emergency access mechanism with threshold-based authorization
+    async generateEmergencyAccessProof(
+        emergencyContext: string,
+        requestingEntity: string
+    ): Promise<Proof> {
+        const policy = this.emergencyAccess.get(emergencyContext);
+        if (!policy) throw new Error('No emergency access policy found');
+
+        const wasmFile = './circuits/emergency_access.wasm';
+        const zkeyFile = './circuits/emergency_access.zkey';
+
+        const input = {
+            policyThreshold: policy.threshold,
+            authorizedEntities: policy.authorizedEntities,
+            requestingEntity,
+            timestamp: Math.floor(Date.now() / 1000),
+            masterSecret: this.masterSecret
+        };
+
+        const { proof } = await groth16.fullProve(input, wasmFile, zkeyFile);
+        return proof;
+    }
+}
+
+// Social Safety Nets Component
+class SocialBenefitsCredential extends IdentityCredential {
+    private benefitsHistory: Map<string, BenefitRecord>;
+    private eligibilityProofs: Map<string, Proof>;
+
+    interface BenefitRecord {
+        benefitType: string;
+        amount: number;
+        startDate: number;
+        endDate: number;
+        status: string;
+        verificationProof: Proof;
+    }
+
+    // Generate proof of eligibility without revealing financial details
+    async generateEligibilityProof(
+        benefitType: string,
+        requiredCriteria: any
+    ): Promise<Proof> {
+        const wasmFile = './circuits/benefits_eligibility.wasm';
+        const zkeyFile = './circuits/benefits_eligibility.zkey';
+
+        const financialData = this.attributes.get('financialStatus');
+        const residencyData = this.attributes.get('residencyStatus');
+        
+        if (!financialData || !residencyData) {
+            throw new Error('Required eligibility data missing');
+        }
+
+        const input = {
+            income: JSON.parse(financialData.value).income,
+            assets: JSON.parse(financialData.value).assets,
+            residencyYears: parseInt(residencyData.value),
+            requiredCriteria,
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof } = await groth16.fullProve(input, wasmFile, zkeyFile);
+        return proof;
+    }
+
+    // Add benefit record with privacy-preserving verification
+    async addBenefitRecord(
+        benefitType: string,
+        amount: number,
+        duration: number
+    ): Promise<void> {
+        const startDate = Date.now();
+        const endDate = startDate + duration;
+
+        const verificationProof = await this.generateBenefitVerification(
+            benefitType,
+            amount,
+            startDate,
+            endDate
+        );
+
+        const record: BenefitRecord = {
+            benefitType,
+            amount,
+            startDate,
+            endDate,
+            status: 'active',
+            verificationProof
+        };
+
+        this.benefitsHistory.set(
+            keccak256(ethers.utils.defaultAbiCoder.encode(
+                ['string', 'uint256', 'uint256', 'uint256'],
+                [benefitType, amount, startDate, endDate]
+            )),
+            record
+        );
+    }
+}
+
+// Enhanced Passport Component
+class PassportCredential extends IdentityCredential {
+    private travelHistory: Map<string, TravelRecord>;
+    private visaRecords: Map<string, VisaRecord>;
+
+    interface TravelRecord {
+        destination: string;
+        entryDate: number;
+        exitDate: number;
+        purpose: string;
+        verificationProof: Proof;
+    }
+
+    interface VisaRecord {
+        country: string;
+        visaType: string;
+        validFrom: number;
+        validUntil: number;
+        entries: string;
+        verificationProof: Proof;
+    }
+
+    // Generate proof of citizenship and identity for border control
+    async generateBorderControlProof(
+        destination: string,
+        requirements: any
+    ): Promise<Proof> {
+        const wasmFile = './circuits/border_control.wasm';
+        const zkeyFile = './circuits/border_control.zkey';
+
+        const identityData = this.attributes.get('identityDetails');
+        const citizenshipData = this.attributes.get('citizenship');
+        const biometricData = this.attributes.get('biometricCommitment');
+
+        if (!identityData || !citizenshipData || !biometricData) {
+            throw new Error('Required passport data missing');
+        }
+
+        const input = {
+            identityDetails: JSON.parse(identityData.value),
+            citizenship: citizenshipData.value,
+            biometricCommitment: biometricData.value,
+            destination,
+            requirements,
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof } = await groth16.fullProve(input, wasmFile, zkeyFile);
+        return proof;
+    }
+
+    // Add visa record with privacy-preserving verification
+    async addVisaRecord(
+        country: string,
+        visaType: string,
+        validityPeriod: number
+    ): Promise<void> {
+        const validFrom = Date.now();
+        const validUntil = validFrom + validityPeriod;
+
+        const verificationProof = await this.generateVisaVerification(
+            country,
+            visaType,
+            validFrom,
+            validUntil
+        );
+
+        const record: VisaRecord = {
+            country,
+            visaType,
+            validFrom,
+            validUntil,
+            entries: 'multiple',
+            verificationProof
+        };
+
+        this.visaRecords.set(
+            keccak256(ethers.utils.defaultAbiCoder.encode(
+                ['string', 'string', 'uint256', 'uint256'],
+                [country, visaType, validFrom, validUntil]
+            )),
+            record
+        );
+    }
+
+    // Generate proof of eligibility for visa-free travel
+    async generateVisaFreeProof(
+        destination: string,
+        agreementType: string
+    ): Promise<Proof> {
+        const wasmFile = './circuits/visa_free_travel.wasm';
+        const zkeyFile = './circuits/visa_free_travel.zkey';
+
+        const input = {
+            citizenship: this.attributes.get('citizenship').value,
+            destination,
+            agreementType,
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof } = await groth16.fullProve(input, wasmFile, zkeyFile);
+        return proof;
+    }
+}
+
+export {
+    HealthcareCredential,
+    SocialBenefitsCredential,
+    PassportCredential
+};
