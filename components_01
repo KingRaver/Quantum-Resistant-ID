@@ -1,0 +1,20 @@
+Let me explain the key features of each specialized component:
+
+Healthcare Component:
+1. Encrypted Health Records Management
+   - Secure storage of medical records with granular access control
+   - Emergency access mechanisms with multi-party authorization
+   - Privacy-preserving insurance verification
+
+2. Social Benefits Component:
+   - Zero-knowledge eligibility proofs for various benefit programs
+   - Secure benefit history tracking
+   - Privacy-preserving income and asset verification
+
+3. Passport Component:
+   - Enhanced border control verification
+   - Visa management system
+   - Travel history tracking with privacy preservation
+   - Visa-free travel eligibility verification
+
+Each component includes specialized zero-knowledge circuits for their specific use cases.
