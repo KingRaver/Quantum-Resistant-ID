@@ -1,0 +1,250 @@
+// Core ZKP Identity System Implementation
+import { buildBabyjubjub } from 'circomlibjs';
+import { groth16 } from 'snarkjs';
+import { ethers } from 'ethers';
+import { keccak256 } from 'ethers/lib/utils';
+
+// Identity Attribute Structure
+interface IdentityAttribute {
+    fieldName: string;
+    value: string;
+    lastVerified: number;
+    verifierPublicKey: string;
+    proof: Proof;
+}
+
+interface Proof {
+    pi_a: string[];
+    pi_b: string[][];
+    pi_c: string[];
+    protocol: string;
+}
+
+class IdentityCredential {
+    private attributes: Map<string, IdentityAttribute>;
+    private masterSecret: string;
+    private revocationRegistry: string;
+    
+    constructor(masterSecret: string) {
+        this.attributes = new Map();
+        this.masterSecret = masterSecret;
+        this.revocationRegistry = ethers.constants.AddressZero;
+    }
+
+    // Generate a zero-knowledge proof for age verification
+    async generateAgeProof(minimumAge: number): Promise<Proof> {
+        const wasmFile = './circuits/age_verification.wasm';
+        const zkeyFile = './circuits/age_verification.zkey';
+        
+        const birthDate = this.attributes.get('birthDate');
+        if (!birthDate) throw new Error('Birth date not found');
+        
+        const currentDate = Math.floor(Date.now() / 1000);
+        const age = (currentDate - parseInt(birthDate.value)) / (365.25 * 24 * 60 * 60);
+        
+        const input = {
+            age: Math.floor(age),
+            minimumAge: minimumAge,
+            masterSecret: this.masterSecret
+        };
+
+        const { proof, publicSignals } = await groth16.fullProve(
+            input,
+            wasmFile,
+            zkeyFile
+        );
+
+        return proof;
+    }
+
+    // Generate selective disclosure proof for medical records
+    async generateHealthProof(requestedFields: string[]): Promise<Proof> {
+        const wasmFile = './circuits/health_verification.wasm';
+        const zkeyFile = './circuits/health_verification.zkey';
+        
+        const healthData = {};
+        for (const field of requestedFields) {
+            const attr = this.attributes.get(field);
+            if (!attr) throw new Error(`Health field ${field} not found`);
+            healthData[field] = attr.value;
+        }
+
+        const input = {
+            healthData,
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof, publicSignals } = await groth16.fullProve(
+            input,
+            wasmFile,
+            zkeyFile
+        );
+
+        return proof;
+    }
+
+    // Add biometric authentication
+    async addBiometricFactor(biometricHash: string): Promise<void> {
+        const commitment = await this.generateBiometricCommitment(biometricHash);
+        this.attributes.set('biometricCommitment', {
+            fieldName: 'biometricCommitment',
+            value: commitment,
+            lastVerified: Date.now(),
+            verifierPublicKey: ethers.constants.AddressZero,
+            proof: null
+        });
+    }
+
+    private async generateBiometricCommitment(biometricHash: string): Promise<string> {
+        const babyJubJub = await buildBabyjubjub();
+        const commitment = babyJubJub.mulPointEscalar(
+            babyJubJub.Base8,
+            BigInt(keccak256(biometricHash + this.masterSecret))
+        );
+        return commitment.toString();
+    }
+
+    // Generate proof of identity for passport-equivalent verification
+    async generatePassportProof(): Promise<Proof> {
+        const wasmFile = './circuits/passport_verification.wasm';
+        const zkeyFile = './circuits/passport_verification.zkey';
+        
+        const requiredFields = ['fullName', 'birthDate', 'nationality', 'biometricCommitment'];
+        const input = {
+            identityFields: {},
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        for (const field of requiredFields) {
+            const attr = this.attributes.get(field);
+            if (!attr) throw new Error(`Required field ${field} not found`);
+            input.identityFields[field] = attr.value;
+        }
+
+        const { proof, publicSignals } = await groth16.fullProve(
+            input,
+            wasmFile,
+            zkeyFile
+        );
+
+        return proof;
+    }
+
+    // Add support for driver's license verification
+    async generateDriverLicenseProof(licenseClass: string): Promise<Proof> {
+        const wasmFile = './circuits/driver_verification.wasm';
+        const zkeyFile = './circuits/driver_verification.zkey';
+        
+        const driverAttr = this.attributes.get('driverLicense');
+        if (!driverAttr) throw new Error('Driver license data not found');
+
+        const input = {
+            licenseData: {
+                class: licenseClass,
+                expiryDate: parseInt(driverAttr.value),
+                restrictions: this.attributes.get('driverRestrictions')?.value || ''
+            },
+            masterSecret: this.masterSecret,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof, publicSignals } = await groth16.fullProve(
+            input,
+            wasmFile,
+            zkeyFile
+        );
+
+        return proof;
+    }
+}
+
+// Verifier class for checking proofs
+class IdentityVerifier {
+    private verificationKey: any;
+
+    constructor(verificationKey: any) {
+        this.verificationKey = verificationKey;
+    }
+
+    async verifyProof(proof: Proof, publicInputs: any): Promise<boolean> {
+        return await groth16.verify(
+            this.verificationKey,
+            publicInputs,
+            proof
+        );
+    }
+
+    // Verify age proof without revealing actual age
+    async verifyAgeProof(proof: Proof, minimumAge: number): Promise<boolean> {
+        const publicInputs = [minimumAge];
+        return this.verifyProof(proof, publicInputs);
+    }
+
+    // Verify health insurance eligibility without revealing medical details
+    async verifyHealthInsurance(proof: Proof, insuranceRequirements: any): Promise<boolean> {
+        const publicInputs = [
+            insuranceRequirements.policyNumber,
+            insuranceRequirements.coverageLevel
+        ];
+        return this.verifyProof(proof, publicInputs);
+    }
+}
+
+// Privacy-preserving revocation system
+class RevocationRegistry {
+    private accumulator: string;
+    private revokedCredentials: Set<string>;
+
+    constructor() {
+        this.accumulator = ethers.constants.HashZero;
+        this.revokedCredentials = new Set();
+    }
+
+    async revokeCredential(credentialHash: string): Promise<void> {
+        this.revokedCredentials.add(credentialHash);
+        await this.updateAccumulator();
+    }
+
+    private async updateAccumulator(): Promise<void> {
+        let newAccumulator = ethers.constants.HashZero;
+        for (const credential of this.revokedCredentials) {
+            newAccumulator = keccak256(
+                ethers.utils.defaultAbiCoder.encode(
+                    ['bytes32', 'bytes32'],
+                    [newAccumulator, credential]
+                )
+            );
+        }
+        this.accumulator = newAccumulator;
+    }
+
+    async generateNonRevocationProof(credentialHash: string): Promise<Proof> {
+        // Implementation of non-revocation proof generation
+        const wasmFile = './circuits/non_revocation.wasm';
+        const zkeyFile = './circuits/non_revocation.zkey';
+
+        const input = {
+            credentialHash,
+            accumulator: this.accumulator,
+            timestamp: Math.floor(Date.now() / 1000)
+        };
+
+        const { proof, publicSignals } = await groth16.fullProve(
+            input,
+            wasmFile,
+            zkeyFile
+        );
+
+        return proof;
+    }
+}
+
+export {
+    IdentityCredential,
+    IdentityVerifier,
+    RevocationRegistry,
+    type IdentityAttribute,
+    type Proof
+};
